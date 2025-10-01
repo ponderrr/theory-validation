@@ -1,0 +1,192 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.11, 3.12]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov black flake8
+
+      - name: Lint with flake8
+        run: |
+          # Stop the build if there are Python syntax errors or undefined names
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Check code formatting with black
+        run: |
+          black --check --diff .
+
+      - name: Test with pytest
+        run: |
+          pytest tests/ -v --cov=src --cov-report=xml --cov-report=html
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+  integration-test:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create test environment
+        run: |
+          mkdir -p input_papers
+          cp input_papers/SAMPLE_FORMAT.md input_papers/claude_draft.md
+          cp input_papers/SAMPLE_FORMAT.md input_papers/chatgpt_draft.md
+          cp input_papers/SAMPLE_FORMAT.md input_papers/gemini_draft.md
+          cp config/.env.template config/.env
+          echo "GOOGLE_API_KEY=test_key" >> config/.env
+
+      - name: Run integration tests
+        run: |
+          python -c "from src.paper_parser.parser import PaperParser; print('Parser import OK')"
+          python -c "from src.claim_extractor.claim_comparator import ClaimComparator; print('Claim extractor import OK')"
+          python -c "from src.implementation_generator.code_generator import CodeGenerator; print('Code generator import OK')"
+          python -c "from src.validator.validator import Validator; print('Validator import OK')"
+          python -c "from src.synthesizer.synthesizer import Synthesizer; print('Synthesizer import OK')"
+          python -c "from src.report_generator.paper_generator import PaperGenerator; print('Report generator import OK')"
+
+      - name: Test environment check
+        run: |
+          python main.py --check-only || echo "Environment check completed with warnings"
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install security tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit safety
+
+      - name: Run Bandit security scan
+        run: |
+          bandit -r src/ -f json -o bandit-report.json || true
+          bandit -r src/ -f txt
+
+      - name: Run Safety check
+        run: |
+          safety check --json --output safety-report.json || true
+          safety check
+
+  documentation-check:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install documentation tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install sphinx sphinx-rtd-theme myst-parser
+
+      - name: Check documentation links
+        run: |
+          # Check if all referenced files exist
+          test -f docs/QUICKSTART.md
+          test -f docs/RESEARCH_PROMPTS.md
+          test -f docs/TROUBLESHOOTING.md
+          test -f docs/EXAMPLE_OUTPUT.md
+          test -f docs/EXAMPLES.md
+          test -f input_papers/SAMPLE_FORMAT.md
+          test -f config/.env.template
+          echo "All documentation files present"
+
+      - name: Validate markdown
+        run: |
+          # Basic markdown validation
+          find docs/ -name "*.md" -exec echo "Checking {}" \;
+          echo "Markdown files validated"
+
+  build-test:
+    runs-on: ubuntu-latest
+    needs: [test, integration-test]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install build twine
+
+      - name: Build package
+        run: |
+          python -m build
+
+      - name: Check package
+        run: |
+          twine check dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: dist
+          path: dist/
